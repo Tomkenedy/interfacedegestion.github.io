@@ -1,0 +1,303 @@
+<!doctype html><html lang="fr"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tank Dashboard (ESP32)</title>
+<style>
+/* (Le CSS complet est ici - J'ai omis le bloc pour la concision du message) */
+:root{--bg:#0a0f1c;--card:#0f1b31;--fg:#e7eefb;--muted:#9bb0d3;--ok:#16c784;--warn:#f5c518;--bad:#ff4757;--acc:#3b82f6;--acc2:#22d3ee}
+/* ... Reste du CSS ... */
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 600px at 10% 0%,#0b162d,#0a0f1c);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+.wrap{max-width:1200px;margin:0 auto;padding:16px 16px 56px}
+h1{font-size:22px;margin:8px 0 8px;font-weight:800;letter-spacing:.2px}
+.top{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.badge{font-size:12px;padding:4px 10px;border-radius:999px;background:#152343;border:1px solid rgba(255,255,255,.06)}
+.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.card{background:linear-gradient(180deg,#0f1b31,#0c1527);border-radius:18px;padding:16px;border:1px solid rgba(255,255,255,.06);box-shadow:0 8px 28px rgba(0,0,0,.35)}
+.muted{color:var(--muted);font-size:12px}
+.kpi{display:flex;align-items:center;justify-content:space-between;margin-top:10px}
+.kpi .v{font-size:28px;font-weight:900}
+.row{display:flex;gap:12px;align-items:center}
+.pill{font-size:12px;padding:4px 10px;border-radius:999px;background:#203050;border:1px solid rgba(255,255,255,.08)}
+.gauge{width:100%;height:160px}
+.alarmbar{display:flex;gap:8px;flex-wrap:wrap}
+.alarm{display:inline-flex;gap:6px;align-items:center;font-size:12px;padding:4px 8px;border-radius:999px;background:#1a2747;border:1px solid rgba(255,255,255,.08)}
+.dot{width:8px;height:8px;border-radius:50%;background:#6d7ea8}
+.dot.bad{background:var(--bad)} .dot.warn{background:var(--warn)} .dot.ok{background:var(--ok)}
+.banner{display:none;margin-top:10px;padding:10px 12px;border-radius:14px;background:#2a1b1b;border:1px solid #703232;box-shadow:inset 0 0 0 1px rgba(255,0,0,.08)}
+.banner.show{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.btn{appearance:none;border:0;border-radius:10px;padding:8px 12px;background:#1e3a8a;color:#dbeafe;font-weight:700;cursor:pointer}
+.btn:hover{filter:brightness(1.1)}
+h3{margin:0 0 6px 0;font-size:14px;color:#cbd5e1}
+.small{font-size:11px;opacity:.8}
+canvas{width:100%;height:60px;display:block}
+.footer{opacity:.7;font-size:12px;margin-top:18px}
+.flash{animation:flash 1s linear infinite}@keyframes flash{0%,100%{opacity:1}50%{opacity:.4}}
+</style>
+<script src="https://unpkg.com/paho-mqtt@1.1.0/paho-mqtt.js"></script>
+</head><body>
+<div class="wrap">
+  <div class="top">
+    <h1>Dashboard cuve (ESP32)</h1>
+    <span class="badge">AP: <b id="ap_ip">--</b></span>
+    <span class="badge">STA: <b id="sta_ip">--</b></span>
+    <span class="badge">Broker: <b id="mqtt_status">--</b></span>
+    <button class="btn" id="muteBtn">Silence 5 min</button>
+  </div>
+
+  <div 
+id="banner" class="banner"><div>
+    <h3>⚠️ Alarmes actives</h3>
+    <div class="small">Niveau/Pression/Température hors seuil. Vérifie la cuve.</div>
+  </div><div class="small flash">Buzzer actif — utilise “Silence 5 min”.</div></div>
+
+  <div class="grid" style="margin-top:12px">
+    <div class="card">
+      <div class="muted">Niveau (cm) • Remplissage (%)</div>
+      <svg class="gauge" viewBox="0 0 120 70" style="overflow:hidden">
+        <defs>
+          <linearGradient id="grad1" x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#22d3ee"/>
+          </linearGradient>
+       </defs>
+        <path d="M10 60 A50 50 0 0 1 110 60" fill="none" stroke="#1e2a46" stroke-width="12" stroke-linecap="round"/>
+        <path id="gLevel" d="M10 60 A50 50 0 0 1 10 60" fill="none" stroke="url(#grad1)" stroke-width="12" stroke-linecap="butt"/>
+        <text x="10" y="68" class="muted" font-size="6">0%</text>
+        <text x="110" y="68" class="muted" font-size="6" text-anchor="end">100%</text>
+      </svg>
+      <div class="kpi">
+        <div class="row">
+        <div class="v" id="level_cm">--</div>
+          <div class="pill"><span id="level_pct">--</span>%</div>
+        </div>
+        <div class="pill" id="lvl_state">OK</div>
+      </div>
+      <canvas id="spark_lvl"></canvas>
+    </div>
+
+    <div class="card">
+      <div class="muted">Volume (L)</div>
+      <svg class="gauge" viewBox="0 0 120 70" style="overflow:hidden">
+        <path d="M10 60 A50 50 0 0 1 110 60" fill="none" stroke="#1e2a46" stroke-width="12" stroke-linecap="round"/>
+        <path id="gVol" d="M10 60 A50 50 0 0 1 10 60" fill="none" stroke="url(#grad1)" stroke-width="12" stroke-linecap="butt"/>
+      </svg>
+      <div class="kpi">
+        <div class="v" id="vol_L">--</div>
+        <div class="muted small" id="cap_txt">Capacité: 10.0 L</div>
+      </div>
+      <canvas id="spark_vol"></canvas>
+    </div>
+
+    <div class="card">
+      
+ <div class="muted">Pression (bar)</div>
+      <svg class="gauge" viewBox="0 0 120 70" style="overflow:hidden">
+        <path d="M10 60 A50 50 0 0 1 110 60" fill="none" stroke="#1e2a46" stroke-width="12" stroke-linecap="round"/>
+        <path id="gP" d="M10 60 A50 50 0 0 1 10 60" fill="none" stroke="url(#grad1)" stroke-width="12" stroke-linecap="butt"/>
+      </svg>
+      <div class="kpi">
+        <div class="v" id="press_bar">--</div>
+        <div class="pill" id="p_state">OK</div>
+      </div>
+    
+   <canvas id="spark_p"></canvas>
+    </div>
+
+    <div class="card">
+      <div class="muted">Température (°C)</div>
+      <svg class="gauge" viewBox="0 0 120 70" style="overflow:hidden">
+        <path d="M10 60 A50 50 0 0 1 110 60" fill="none" stroke="#1e2a46" stroke-width="12" stroke-linecap="round"/>
+        <path id="gT" d="M10 60 A50 50 0 0 1 10 60" fill="none" stroke="url(#grad1)" stroke-width="12" stroke-linecap="butt"/>
+      </svg>
+      <div class="kpi">
+      
+   <div class="v" id="temp_C">--</div>
+        <div class="pill" id="t_state">OK</div>
+      </div>
+      <canvas id="spark_t"></canvas>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="muted">Paramètres & Alarmes</div>
+    <div id="alarms" class="alarmbar" style="margin-top:8px"></div>
+    <div class="small" style="margin-top:10px">Seuils: Niveau Bas: 8.0%, Niveau Haut: 95.0%, Pression Max: 12.0 bar, Temp Max: 60.0°C</div>
+  </div>
+
+  <div class="footer">
+    Mode de connexion: <b id="conn_mode">--</b>
+  </div>
+</div>
+
+<script>
+// --- CONFIGURATION DU DASHBOARD ---
+// L'URL API locale par défaut pour le ESP32
+const LOCAL_API_URL = 'http://' + (window.location.hostname || '192.168.4.1') + '/api/telemetry';
+const LOCAL_CMD_URL = 'http://' + (window.location.hostname || '192.168.4.1') + '/api/mute';
+
+// Configuration MQTT (Broker public)
+const MQTT_HOST = 'test.mosquitto.org';
+const MQTT_PORT = 8080; // Port WebSocket
+const MQTT_TOPIC_IN = 'plant/tank1/telemetry';
+const MQTT_TOPIC_MUTE = 'plant/tank1/cmd/mute';
+const CLIENT_ID = 'web_dashboard_' + Math.random().toString(16).substr(2, 8); 
+
+const VMAX = 10.0;
+const P_MAX = 14.0;
+const THIGH = 60.0;
+
+let client;
+let currentMode = 'MQTT Global'; 
+let fetchTimer = null;
+
+// --- GESTION DE LA CONNEXION (MQTT UNIQUEMENT pour GitHub Pages) ---
+function startMqtt() {
+    document.getElementById("conn_mode").textContent = "Global (via MQTT)";
+    document.getElementById("mqtt_status").textContent = "Connexion...";
+
+    // Le script Node-RED n'est pas utilisé ici, donc nous devons simuler les adresses IP
+    document.getElementById("ap_ip").textContent  = 'N/A';
+    document.getElementById("sta_ip").textContent = 'N/A';
+
+    client = new Paho.MQTT.Client(MQTT_HOST, MQTT_PORT, CLIENT_ID);
+    client.onConnectionLost = () => {
+        document.getElementById("mqtt_status").textContent = "Déconnecté";
+        setTimeout(startMqtt, 5000); 
+    };
+    client.onMessageArrived = (message) => {
+        if (message.destinationName === MQTT_TOPIC_IN) {
+            try {
+                const data = JSON.parse(message.payloadString);
+                // MQTT envoie les données complètes, mais nous devons forcer les IP
+                data.net = data.net || {ap_ip: 'N/A', sta_ip: 'N/A'}; 
+                updateDashboard(data); 
+            } catch (e) {
+                console.error("Erreur de parsing JSON:", e);
+            }
+        }
+    };
+    client.connect({ 
+        onSuccess: () => {
+            document.getElementById("mqtt_status").textContent = "Connecté (OK)";
+            client.subscribe(MQTT_TOPIC_IN);
+        }, 
+        useSSL: false,
+        onFailure: () => {
+            document.getElementById("mqtt_status").textContent = "Connexion KO";
+            setTimeout(startMqtt, 5000); 
+        }
+    });
+}
+
+function sendMuteCommand() {
+    if (client && client.isConnected()) {
+        const message = new Paho.MQTT.Message("5"); 
+        message.destinationName = MQTT_TOPIC_MUTE;
+        client.send(message);
+        alert("Commande 'Mute 5 min' envoyée via MQTT.");
+    } else {
+        alert("MQTT non connecté. Impossible d'envoyer la commande.");
+    }
+}
+
+// --- RENDU GRAPHIQUE (Mise à jour pour les courbes en zone) ---
+function arc(percent){
+    percent = Math.max(0, Math.min(100, percent));
+    const cx=60, cy=60, r=50; 
+    const angleDeg = percent * 1.8; 
+    const angleRad = angleDeg * (Math.PI / 180); 
+    const x0 = cx - r; 
+    const y0 = cy; 
+    const x = cx + r * Math.cos(Math.PI - angleRad);
+    const y = cy - r * Math.sin(Math.PI - angleRad); 
+    const laf = 0; 
+    const sf = 1;
+    if (percent === 0) return `M${x0} ${y0} A${r} ${r} 0 0 1 ${x0} ${y0}`; 
+    return `M${x0} ${y0} A${r} ${r} 0 ${laf} ${sf} ${x.toFixed(1)} ${y.toFixed(1)}`;
+}
+
+function setGauge(id,p){ document.getElementById(id).setAttribute("d", arc(p)); }
+function pill(text, cls){ return `<span class="alarm"><span class="dot ${cls}"></span>${text}</span>`; }
+const histN=60; const H={lvl:[],vol:[],p:[],t:[]};
+function pushHist(a,v){ a.push(v); if(a.length>histN) a.shift(); }
+
+function drawSpark(id, arr){
+    const c=document.getElementById(id), ctx=c.getContext('2d');
+    const w=c.width=c.clientWidth, h=c.height=c.clientHeight;
+    ctx.clearRect(0,0,w,h);
+    if(arr.length<2) return;
+    const min=Math.min(...arr), max=Math.max(...arr), rng=(max-min)||1;
+    const gradient = ctx.createLinearGradient(0, 0, 0, h);
+    gradient.addColorStop(0, 'rgba(34, 211, 238, 0.5)'); 
+    gradient.addColorStop(1, 'rgba(34, 211, 238, 0.05)'); 
+
+    // Dessin de la zone (Area Chart)
+    ctx.beginPath();
+    ctx.moveTo(0, h); 
+    arr.forEach((v,i)=>{ 
+        const x = i / (arr.length - 1) * w; 
+        const y = h - ((v - min) / rng) * h; 
+        ctx.lineTo(x, y); 
+    });
+    ctx.lineTo(w, h); 
+    ctx.closePath();
+    ctx.fillStyle = gradient; 
+    ctx.fill();
+    
+    // Dessin de la ligne supérieure
+    ctx.lineWidth = 2; 
+    ctx.globalAlpha = 1; 
+    ctx.beginPath();
+    arr.forEach((v,i)=>{ 
+        const x = i / (arr.length - 1) * w; 
+        const y = h - ((v - min) / rng) * h; 
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); 
+    });
+    ctx.strokeStyle = "#22d3ee"; 
+    ctx.stroke();
+}
+
+
+function updateDashboard(j){
+    document.getElementById("ap_ip").textContent  = j.net.ap_ip;
+    document.getElementById("sta_ip").textContent = j.net.sta_ip;
+    document.getElementById("level_cm").textContent = j.level_cm.toFixed(1);
+    document.getElementById("level_pct").textContent= j.level_pct.toFixed(1);
+    document.getElementById("vol_L").textContent    = j.volume_L.toFixed(2);
+    document.getElementById("press_bar").textContent= j.press_bar.toFixed(2);
+    document.getElementById("temp_C").textContent   = (j.temp_C==null? '—' : j.temp_C.toFixed(1));
+
+    setGauge("gLevel", j.level_pct);
+    const vPct = 100.0 * (j.volume_L / VMAX);
+    setGauge("gVol", Math.max(0,Math.min(100,vPct)));
+    setGauge("gP", Math.max(0,Math.min(100, 100*j.press_bar/P_MAX)));
+    setGauge("gT", Math.max(0,Math.min(100, 100*(j.temp_C||0)/THIGH)));
+
+    const al=j.alarms||{}; const bar=[];
+    const lvlState=document.getElementById("lvl_state");
+    const pState=document.getElementById("p_state");
+    const tState=document.getElementById("t_state");
+    lvlState.textContent="OK"; pState.textContent="OK"; tState.textContent="OK";
+    lvlState.className="pill";
+    pState.className="pill"; tState.className="pill";
+    if(al.level_low){ bar.push(pill("Niveau bas","warn")); lvlState.textContent="Bas"; }
+    if(al.level_high){ bar.push(pill("Niveau haut","warn")); lvlState.textContent="Haut"; }
+    if(al.press_high){ bar.push(pill("Pression élevée","bad")); pState.textContent="Elevée"; }
+    if(al.temp_high){ bar.push(pill("Température élevée","bad")); tState.textContent="Elevée"; }
+    document.getElementById("alarms").innerHTML = bar.length? bar.join(" ") : pill("Aucune alarme","ok");
+
+    const banner=document.getElementById("banner");
+    if(j.alarm_active){ banner.classList.add("show"); } else { banner.classList.remove("show"); }
+
+    pushHist(H.lvl, j.level_pct);
+    pushHist(H.vol, j.volume_L);
+    pushHist(H.p, j.press_bar);
+    pushHist(H.t, j.temp_C||0);
+    drawSpark("spark_lvl", H.lvl);
+    drawSpark("spark_vol", H.vol);
+    drawSpark("spark_p",   H.p);
+    drawSpark("spark_t",   H.t);
+}
+
+document.getElementById("muteBtn").onclick = sendMuteCommand;
+startMqtt(); 
+</script>
+</body></html>
